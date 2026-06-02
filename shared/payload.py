@@ -1,49 +1,77 @@
-"""Payload builder, JWT assemble/parse."""
-import jwt
 import json
+import time
 import base64
-from datetime import datetime, timedelta
-from shared.crypto_utils import compute_identity_hash
-from shared.config import settings
+from typing import Any
+from shared.crypto_utils import sign_payload, compute_identity_hash
 
-class PayloadBuilder:
-    """Build passenger payload for signing."""
+def build_payload(
+    ticket_type: str,
+    uuid: str,
+    train: str,
+    from_stn: str,
+    to_stn: str,
+    ticket_class: str,
+    travel_date: str,
+    departure_unix: int,
+    arrival_unix: int,
+    passengers: list[dict]
+) -> dict:
+    """Constructs the payload dictionary with identity hashing and timing metadata."""
+    now = int(time.time())
     
-    @staticmethod
-    def create_ticket_payload(passenger_data: dict) -> dict:
-        """Create ticket payload from passenger data."""
-        return {
-            'pnr': passenger_data.get('pnr'),
-            'name': passenger_data.get('name'),
-            'coach': passenger_data.get('coach'),
-            'seat': passenger_data.get('seat'),
-            'train': passenger_data.get('train'),
-            'date': passenger_data.get('date'),
-            'identity_hash': compute_identity_hash(json.dumps(passenger_data, sort_keys=True)),
-            'issued_at': datetime.utcnow().isoformat(),
-        }
+    # Process passengers: compute identity hash and remove raw PII
+    processed_passengers = []
+    for p in passengers:
+        p_copy = p.copy()
+        if "aadhaar" in p_copy and "dob" in p_copy:
+            p_copy["id_hash"] = compute_identity_hash(p_copy.pop("aadhaar"), p_copy.pop("dob"))
+        processed_passengers.append(p_copy)
 
-def create_jwt(payload: dict, private_key, algorithm='HS256', secret=None) -> str:
-    """Create JWT token."""
-    payload['exp'] = datetime.utcnow() + timedelta(days=365)
-    return jwt.encode(payload, secret or 'secret', algorithm=algorithm)
+    return {
+        "ticket_type": ticket_type,
+        "uuid": uuid,
+        "train": train,
+        "from_stn": from_stn,
+        "to_stn": to_stn,
+        "ticket_class": ticket_class,
+        "travel_date": travel_date,
+        "departure": departure_unix,
+        "arrival": arrival_unix,
+        "passengers": processed_passengers,
+        "iat": now,
+        "vf": now,                # Valid From: immediate
+        "vu": arrival_unix + 86400 # Valid Until: arrival + 24hrs
+    }
 
-def parse_jwt(token: str, secret=None) -> dict:
-    """Parse JWT token."""
+def assemble_jwt(payload_dict: dict, private_key: Any) -> str:
+    """Assembles and signs a compact JWT (Payload.Signature)."""
+    # Compact JSON serialization: no spaces
+    payload_json = json.dumps(payload_dict, sort_keys=False, separators=(',', ':'))
+    payload_bytes = payload_json.encode('utf-8')
+    
+    # Base64url encode (no padding)
+    payload_b64 = base64.urlsafe_b64encode(payload_bytes).decode('utf-8').rstrip('=')
+    
+    # Sign
+    sig_b64 = sign_payload(payload_bytes, private_key)
+    
+    return f"{payload_b64}.{sig_b64}"
+
+def parse_jwt(jwt_str: str) -> tuple[dict, bytes, str]:
+    """Splits, decodes, and returns payload, raw bytes, and signature."""
     try:
-        return jwt.decode(token, secret or 'secret', algorithms=['HS256', 'HS512'])
-    except jwt.InvalidTokenError:
-        return None
+        parts = jwt_str.split('.')
+        if len(parts) != 2:
+            raise ValueError("Malformed JWT: expected exactly one dot separator")
+            
+        payload_b64, sig_b64 = parts
+        
+        # Add back padding for base64 decoding
+        padding = '=' * (-len(payload_b64) % 4)
+        raw_payload_bytes = base64.urlsafe_b64decode(payload_b64 + padding)
+        
+        payload_dict = json.loads(raw_payload_bytes.decode('utf-8'))
+        return payload_dict, raw_payload_bytes, sig_b64
+    except Exception as e:
+        raise ValueError(f"Failed to parse JWT: {e}")
 
-def encode_payload_b64(payload: dict) -> str:
-    """Encode payload to base64."""
-    json_bytes = json.dumps(payload).encode('utf-8')
-    return base64.b64encode(json_bytes).decode('utf-8')
-
-def decode_payload_b64(encoded: str) -> dict:
-    """Decode payload from base64."""
-    try:
-        json_bytes = base64.b64decode(encoded.encode('utf-8'))
-        return json.loads(json_bytes.decode('utf-8'))
-    except:
-        return None
