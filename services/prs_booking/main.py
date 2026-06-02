@@ -265,4 +265,31 @@ def ticket_qr(pnr: str, db: Session = Depends(get_db)):
 def ticket_raw(pnr: str, db: Session = Depends(get_db)):
     ticket = db.query(IssuedTicket).filter_by(pnr=pnr).first()
     if not ticket:
-        raise HTTPException(status_code=404
+        raise HTTPException(status_code=404,detail="PNR not found")
+    return {
+        "pnr":       ticket.pnr,
+        "uuid":      ticket.uuid,
+        "jwt":       ticket.jwt_string,
+        "issued_at": ticket.issued_at,
+    }
+
+
+@app.get("/tickets")
+def list_tickets(db: Session = Depends(get_db)):
+    tickets = db.query(IssuedTicket).order_by(IssuedTicket.issued_at.desc()).all()
+    return {
+        "tickets": [
+            {
+                "pnr":             t.pnr,
+                "train":           t.train,
+                "from":            t.from_stn,
+                "to":              t.to_stn,
+                "class":           t.ticket_class,
+                "date":            t.travel_date,
+                "type":            t.ticket_type,
+                "passengers":      t.passenger_names,
+                "issued_at":       t.issued_at,
+            }
+            for t in tickets
+        ]
+    }
