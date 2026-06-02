@@ -1,8 +1,11 @@
 import json
 import time
+import uuid as uuid_lib
 import base64
 from typing import Any
+
 from shared.crypto_utils import sign_payload, compute_identity_hash
+
 
 def build_payload(
     ticket_type: str,
@@ -14,64 +17,91 @@ def build_payload(
     travel_date: str,
     departure_unix: int,
     arrival_unix: int,
-    passengers: list[dict]
+    passengers: list[dict],
 ) -> dict:
-    """Constructs the payload dictionary with identity hashing and timing metadata."""
+    """
+    Constructs the full payload dict exactly matching the proposal schema.
+
+    passengers: list of dicts with keys: name, berth, aadhaar (optional), dob (optional)
+
+    Validity windows per spec:
+      Reserved / Tatkal : vf = departure - 2h,  vu = arrival + 4h
+      Unreserved        : vf = departure - 1h,  vu = arrival + 6h
+    """
     now = int(time.time())
-    
-    # Process passengers: compute identity hash and remove raw PII
-    processed_passengers = []
+
+    if ticket_type == "U":
+        vf = departure_unix - 3600
+        vu = arrival_unix  + 21600
+    else:
+        vf = departure_unix - 7200
+        vu = arrival_unix  + 14400
+
+    pax = []
     for p in passengers:
-        p_copy = p.copy()
-        if "aadhaar" in p_copy and "dob" in p_copy:
-            p_copy["id_hash"] = compute_identity_hash(p_copy.pop("aadhaar"), p_copy.pop("dob"))
-        processed_passengers.append(p_copy)
+        aadhaar = p.get("aadhaar")
+        dob     = p.get("dob")
+        berth   = p.get("berth")
+
+        # Identity hash only when both aadhaar and dob are provided
+        # and class warrants it (AC / Tatkal). For SL without aadhaar → null.
+        id_hash = None
+        if aadhaar and dob:
+            id_hash = compute_identity_hash(aadhaar, dob)
+
+        # Unreserved: berth and id are null per spec
+        if ticket_type == "U":
+            berth   = None
+            id_hash = None
+
+        pax.append({"b": berth, "id": id_hash})
 
     return {
-        "ticket_type": ticket_type,
-        "uuid": uuid,
+        "v":     1,
+        "type":  ticket_type,
+        "uuid":  uuid,
         "train": train,
-        "from_stn": from_stn,
-        "to_stn": to_stn,
-        "ticket_class": ticket_class,
-        "travel_date": travel_date,
-        "departure": departure_unix,
-        "arrival": arrival_unix,
-        "passengers": processed_passengers,
-        "iat": now,
-        "vf": now,                # Valid From: immediate
-        "vu": arrival_unix + 86400 # Valid Until: arrival + 24hrs
+        "from":  from_stn,
+        "to":    to_stn,
+        "class": ticket_class,
+        "date":  travel_date,
+        "vf":    vf,
+        "vu":    vu,
+        "iat":   now,
+        "pax":   pax,
     }
 
+
 def assemble_jwt(payload_dict: dict, private_key: Any) -> str:
-    """Assembles and signs a compact JWT (Payload.Signature)."""
-    # Compact JSON serialization: no spaces
-    payload_json = json.dumps(payload_dict, sort_keys=False, separators=(',', ':'))
-    payload_bytes = payload_json.encode('utf-8')
-    
-    # Base64url encode (no padding)
-    payload_b64 = base64.urlsafe_b64encode(payload_bytes).decode('utf-8').rstrip('=')
-    
-    # Sign
-    sig_b64 = sign_payload(payload_bytes, private_key)
-    
+    """
+    Compact JSON → UTF-8 bytes → base64url (no padding) → sign.
+    Returns '<payload_b64url>.<sig_b64url>'
+    """
+    payload_json  = json.dumps(payload_dict, sort_keys=False, separators=(",", ":"))
+    payload_bytes = payload_json.encode("utf-8")
+    payload_b64   = base64.urlsafe_b64encode(payload_bytes).decode("utf-8").rstrip("=")
+    sig_b64       = sign_payload(payload_bytes, private_key)
     return f"{payload_b64}.{sig_b64}"
 
-def parse_jwt(jwt_str: str) -> tuple[dict, bytes, str]:
-    """Splits, decodes, and returns payload, raw bytes, and signature."""
-    try:
-        parts = jwt_str.split('.')
-        if len(parts) != 2:
-            raise ValueError("Malformed JWT: expected exactly one dot separator")
-            
-        payload_b64, sig_b64 = parts
-        
-        # Add back padding for base64 decoding
-        padding = '=' * (-len(payload_b64) % 4)
-        raw_payload_bytes = base64.urlsafe_b64decode(payload_b64 + padding)
-        
-        payload_dict = json.loads(raw_payload_bytes.decode('utf-8'))
-        return payload_dict, raw_payload_bytes, sig_b64
-    except Exception as e:
-        raise ValueError(f"Failed to parse JWT: {e}")
 
+def parse_jwt(jwt_str: str) -> tuple[dict, bytes, str]:
+    """
+    Splits '<payload_b64url>.<sig_b64url>'.
+    Returns (payload_dict, raw_payload_bytes, sig_b64url).
+    raw_payload_bytes are the exact bytes that were signed — used for verification.
+    Raises ValueError on any malformed input.
+    """
+    parts = jwt_str.strip().split(".")
+    if len(parts) != 2:
+        raise ValueError(f"Expected exactly one '.' separator, got {len(parts) - 1}")
+
+    payload_b64, sig_b64 = parts
+
+    try:
+        padding         = "=" * (-len(payload_b64) % 4)
+        raw_bytes       = base64.urlsafe_b64decode(payload_b64 + padding)
+        payload_dict    = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Failed to decode payload segment: {e}")
+
+    return payload_dict, raw_bytes, sig_b64
