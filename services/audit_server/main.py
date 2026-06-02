@@ -1,84 +1,62 @@
-"""Audit Server - Logs all authentication events (Port 8002)."""
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-import uvicorn
-from datetime import datetime
-from shared.config import settings
-from shared.database import init_db, SessionLocal
+from shared.database import init_db, get_db
 from shared.models import AuditLog
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from pydantic import BaseModel
+import time
 
 app = FastAPI(title="Audit Server")
 
-class AuditEvent(BaseModel):
-    event_type: str
-    passenger_id: str
-    service: str
-    status: str
-    details: str
-
-class AuditEventResponse(BaseModel):
-    id: int
-    timestamp: datetime
-    event_type: str
-    passenger_id: str
-    service: str
-    status: str
-    details: str
-    
-    class Config:
-        from_attributes = True
-
 @app.on_event("startup")
-async def startup():
-    """Initialize database on startup."""
+def startup_event():
     init_db()
-    logger.info("Audit Server started on port 8002")
 
-@app.post("/log", response_model=AuditEventResponse)
-async def log_event(event: AuditEvent):
-    """Log authentication event."""
-    try:
-        db = SessionLocal()
-        audit_log = AuditLog(
-            event_type=event.event_type,
-            passenger_id=event.passenger_id,
-            service=event.service,
-            status=event.status,
-            details=event.details
-        )
-        db.add(audit_log)
-        db.commit()
-        db.refresh(audit_log)
-        
-        logger.info(f"Logged event: {event.event_type} for {event.passenger_id}")
-        
-        db.close()
-        return audit_log
-    except Exception as e:
-        logger.error(f"Error logging event: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+class LogEntry(BaseModel):
+    uuid: str
+    tte_id: str
+    train: str
+    coach: str | None = None
+    result: str
+    ip_address: str | None = None
 
-@app.get("/logs/{passenger_id}")
-async def get_passenger_logs(passenger_id: str):
-    """Get audit logs for a passenger."""
-    try:
-        db = SessionLocal()
-        logs = db.query(AuditLog).filter(AuditLog.passenger_id == passenger_id).all()
-        db.close()
-        return logs
-    except Exception as e:
-        logger.error(f"Error fetching logs: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/log")
+def log_event(entry: LogEntry, db: Session = Depends(get_db)):
+    # 1. Check if uuid exists
+    existing = db.query(AuditLog).filter(AuditLog.uuid == entry.uuid).first()
+    is_duplicate = False
+    
+    if existing:
+        is_duplicate = True
+        # Mark all prior entries with this UUID as duplicates
+        db.query(AuditLog).filter(AuditLog.uuid == entry.uuid).update({"is_duplicate": 1})
+    
+    # 2. Insert new log
+    new_log = AuditLog(
+        **entry.dict(),
+        timestamp=int(time.time()),
+        is_duplicate=1 if is_duplicate else 0
+    )
+    db.add(new_log)
+    db.commit()
+    return {"is_duplicate": is_duplicate}
+
+@app.get("/duplicates")
+def get_duplicates(db: Session = Depends(get_db)):
+    # Query all marked as duplicate
+    dupes = db.query(AuditLog).filter(AuditLog.is_duplicate == 1).all()
+    return {"duplicates": [log.__dict__ for log in dupes]}
+
+@app.get("/log/{uuid}")
+def get_log_by_uuid(uuid: str, db: Session = Depends(get_db)):
+    logs = db.query(AuditLog).filter(AuditLog.uuid == uuid).all()
+    return {"events": [log.__dict__ for log in logs]}
+
+@app.get("/stats")
+def get_stats(db: Session = Depends(get_db)):
+    from sqlalchemy import func
+    stats = db.query(AuditLog.result, func.count(AuditLog.id)).group_by(AuditLog.result).all()
+    return {result: count for result, count in stats}
 
 @app.get("/health")
-async def health():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "audit_server"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=settings.AUDIT_SERVER_PORT)
+def health():
+    return {"status": "ok"}
