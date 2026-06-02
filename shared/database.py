@@ -1,25 +1,26 @@
-"""Database module - SQLAlchemy engine, session factory, Base."""
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from shared.config import settings
+from shared.models import Base
 
-# Create database engine
-engine = create_engine(settings.DATABASE_URL, echo=False)
+# Create engine
+engine = create_engine(
+    f"sqlite:///{settings.DB_PATH}",
+    connect_args={"check_same_thread": False}  # SQLite-specific
+)
 
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class for ORM models
-Base = declarative_base()
-
+# Dependency for FastAPI
 def get_db():
-    """Dependency for getting database session."""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
+# Initialize DB — creates all tables
 def init_db():
-    """Initialize database tables."""
     Base.metadata.create_all(bind=engine)
+    print(f"✓ Database initialized at {settings.DB_PATH}")

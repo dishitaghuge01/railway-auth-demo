@@ -1,42 +1,46 @@
-"""ORM models: AuditLog, PassengerChart, IssuedTicket."""
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean
-from datetime import datetime
-from shared.database import Base
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import declarative_base
 
-class AuditLog(Base):
-    """Audit log for authentication events."""
-    __tablename__ = "audit_logs"
-    
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    event_type = Column(String(50))
-    passenger_id = Column(String(50))
-    service = Column(String(50))
-    status = Column(String(20))
-    details = Column(Text)
-
-class PassengerChart(Base):
-    """Passenger reservation data."""
-    __tablename__ = "passenger_charts"
-    
-    id = Column(Integer, primary_key=True)
-    pnr = Column(String(10), unique=True)
-    passenger_name = Column(String(100))
-    coach = Column(String(10))
-    seat_number = Column(String(10))
-    train_number = Column(String(10))
-    journey_date = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
+Base = declarative_base()
 
 class IssuedTicket(Base):
-    """Issued and signed tickets."""
-    __tablename__ = "issued_tickets"
+    __tablename__ = 'issued_tickets'
     
-    id = Column(Integer, primary_key=True)
-    pnr = Column(String(10), unique=True)
-    ticket_hash = Column(String(64))
-    signature = Column(Text)
-    public_key_version = Column(Integer)
-    issued_at = Column(DateTime, default=datetime.utcnow)
-    verified = Column(Boolean, default=False)
-    verification_count = Column(Integer, default=0)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uuid = Column(String, unique=True, nullable=False)
+    pnr = Column(String, unique=True, nullable=False)
+    jwt_string = Column(String, nullable=False)
+    train = Column(String, nullable=False)
+    from_stn = Column(String, nullable=False)
+    to_stn = Column(String, nullable=False)
+    ticket_class = Column(String, nullable=False)
+    travel_date = Column(String, nullable=False)
+    ticket_type = Column(String, nullable=False)
+    issued_at = Column(Integer, nullable=False)
+    passenger_names = Column(String, nullable=False)
+
+class PassengerChart(Base):
+    __tablename__ = 'passenger_chart'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pnr = Column(String, nullable=False)
+    uuid = Column(String, nullable=False)
+    train = Column(String, nullable=False)
+    travel_date = Column(String, nullable=False)
+    berth = Column(String, nullable=True)
+    passenger_name = Column(String, nullable=False)
+    ticket_class = Column(String, nullable=False)
+    aadhaar_hash = Column(String, nullable=True)
+
+class AuditLog(Base):
+    __tablename__ = 'audit_log'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uuid = Column(String, nullable=False)
+    tte_id = Column(String, nullable=False)
+    train = Column(String, nullable=False)
+    coach = Column(String, nullable=True)
+    timestamp = Column(Integer, nullable=False)
+    result = Column(String, nullable=False)
+    is_duplicate = Column(Integer, default=0)
+    ip_address = Column(String, nullable=True)
